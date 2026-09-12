@@ -50,6 +50,8 @@ def _build_auth():
         client_id=client_id,
         client_secret=client_secret,
         base_url=base_url,
+        resource_base_url=base_url,
+        issuer_url=base_url,
     )
 
 
