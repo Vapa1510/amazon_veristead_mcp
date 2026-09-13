@@ -14,6 +14,9 @@ in the environment.  Without those variables the server starts in open
 from __future__ import annotations
 
 import os
+import uvicorn
+from starlette.middleware import Middleware
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from dotenv import load_dotenv
 from fastmcp import FastMCP
@@ -150,10 +153,33 @@ def forget_topic(topic: str) -> dict:
     return forget_topic_impl(topic)
 
 
+class StripWWWAuthenticateMiddleware:
+    def __init__(self, app: ASGIApp):
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+
+        async def wrapped_send(message):
+            if message["type"] == "http.response.start" and message.get("status") == 401:
+                message["headers"] = [
+                    (k, v) for k, v in message.get("headers", []) if k.lower() != b"www-authenticate"
+                ]
+            await send(message)
+
+        await self.app(scope, receive, wrapped_send)
+
+
 def main() -> None:
     host = os.getenv("MCP_HOST", "0.0.0.0")
     port = int(os.getenv("MCP_PORT", "8000"))
-    mcp.run(transport="streamable-http", host=host, port=port)
+    app = mcp.http_app(
+        transport="streamable-http",
+        middleware=[Middleware(StripWWWAuthenticateMiddleware)],
+    )
+    uvicorn.run(app, host=host, port=port)
 
 
 if __name__ == "__main__":
