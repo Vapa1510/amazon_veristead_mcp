@@ -1,0 +1,22 @@
+[project]
+name = "veristead-mcp"
+version = "0.1.0"
+description = "Verified smart-home execution layer MCP server for the Amazon Build/Ship/Shape hackathon (Alexa+ track)"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { file = "LICENSE" }
+dependencies = [
+    "fastmcp>=2.0",
+    "python-dotenv>=1.0",
+    "uvicorn>=0.30",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
