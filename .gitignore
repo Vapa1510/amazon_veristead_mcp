@@ -17,3 +17,7 @@ data/*.db
 
 # Alexa AI CLI local credentials (never commit these)
 .alexa-ai/
+
+# Private keys / TLS material (never commit)
+*.pem
+*.key

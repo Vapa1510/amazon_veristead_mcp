@@ -42,7 +42,7 @@ class CallbackHandler(BaseHTTPRequestHandler):
             self.wfile.write(b"Missing code in callback.")
 
 def run_callback_server():
-    server = HTTPServer(('localhost', CALLBACK_PORT), CallbackHandler)
+    server = HTTPServer(('0.0.0.0', CALLBACK_PORT), CallbackHandler)
     while auth_code is None:
         server.handle_request()
 
@@ -61,19 +61,42 @@ async def main():
     server_thread = threading.Thread(target=run_callback_server, daemon=True)
     server_thread.start()
 
-    # 3. Construct Authorization URL
+    # 3. Dynamic Client Registration with FastMCP OAuth server
+    print("📋 Registering OAuth client dynamically with FastMCP server...")
+    register_url = f"{SERVER_URL}/register"
+    reg_payload = {
+        "client_name": "test-script-client",
+        "redirect_uris": [REDIRECT_URI],
+        "grant_types": ["authorization_code"],
+        "response_types": ["code"],
+    }
+    client_id = CLIENT_ID
+    async with httpx.AsyncClient() as client:
+        try:
+            reg_resp = await client.post(register_url, json=reg_payload)
+            if reg_resp.status_code in (200, 201):
+                client_id = reg_resp.json().get("client_id", CLIENT_ID)
+                print(f"✅ Registered client_id: {client_id}")
+            else:
+                print(f"⚠️ Registration returned status {reg_resp.status_code}, falling back to default client_id")
+        except Exception as e:
+            print(f"⚠️ Dynamic registration failed: {e}")
+
+    # 4. Construct Authorization URL
     auth_url = (
-        f"{SERVER_URL}/auth/authorize?"
+        f"{SERVER_URL}/authorize?"
         f"response_type=code&"
-        f"client_id={CLIENT_ID}&"
+        f"client_id={client_id}&"
         f"redirect_uri={urllib.parse.quote(REDIRECT_URI)}&"
         f"code_challenge={code_challenge}&"
         f"code_challenge_method=S256&"
         f"scope=user"
     )
                 
-    print("\n👉 ACTION REQUIRED: Open this URL in your browser to log in via GitHub:")
+    print("\nACTION REQUIRED: Open this URL in your browser to log in via GitHub:")
     print(f"\n{auth_url}\n")
+    with open("login_url.txt", "w") as f:
+        f.write(auth_url)
     print("Waiting for browser redirect...")
 
     # Wait for the user to complete login flow
@@ -82,12 +105,12 @@ async def main():
 
     print(f"\n✅ Received Authorization Code: {auth_code[:8]}........")
 
-    # 4. Token Exchange
+    # 5. Token Exchange
     print(f"🔄 Exchanging code for Bearer token...")
-    token_url = f"{SERVER_URL}/auth/token"
+    token_url = f"{SERVER_URL}/token"
     token_data = {
         "grant_type": "authorization_code",
-        "client_id": CLIENT_ID,
+        "client_id": client_id,
         "code": auth_code,
         "redirect_uri": REDIRECT_URI,
         "code_verifier": code_verifier,
@@ -111,24 +134,25 @@ async def main():
     headers = {"Authorization": f"Bearer {access_token}"}
     
     try:
-        async with streamable_http_client(mcp_endpoint, headers=headers) as (read_stream, write_stream):
-            async with ClientSession(read_stream, write_stream) as session:
-                await session.initialize()
-                print("✅ MCP Session Initialized.")
-                
-                print("\nFetching available tools...")
-                tools_response = await session.list_tools()
-                print(f"Tools available: {', '.join(t.name for t in tools_response.tools)}")
-                
-                print("\nExecuting 'get_device_status' tool securely...")
-                result = await session.call_tool("get_device_status", {})
-                
-                print("\n" + "=" * 60)
-                print(" SECURE TOOL EXECUTION RESULT:")
-                print("=" * 60)
-                for item in result.content:
-                    print(item.text)
-                print("=" * 60)
+        async with httpx.AsyncClient(headers=headers) as http_client:
+            async with streamable_http_client(mcp_endpoint, http_client=http_client) as (read_stream, write_stream):
+                async with ClientSession(read_stream, write_stream) as session:
+                    await session.initialize()
+                    print("✅ MCP Session Initialized.")
+                    
+                    print("\nFetching available tools...")
+                    tools_response = await session.list_tools()
+                    print(f"Tools available: {', '.join(t.name for t in tools_response.tools)}")
+                    
+                    print("\nExecuting 'get_device_status' tool securely...")
+                    result = await session.call_tool("get_device_status", {})
+                    
+                    print("\n" + "=" * 60)
+                    print(" SECURE TOOL EXECUTION RESULT:")
+                    print("=" * 60)
+                    for item in result.content:
+                        print(item.text)
+                    print("=" * 60)
                 
     except Exception as e:
         print(f"\n❌ MCP Connection Failed: {e}")

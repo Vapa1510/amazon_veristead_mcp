@@ -102,3 +102,94 @@ def test_missing_device_or_action_field_is_an_error(tmp_path, monkeypatch):
     result = intent.interpret_command_impl("I'm cold", client=client)
 
     assert result["status"] == "error"
+
+
+def test_fenced_json_response_is_parsed(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-model-id")
+
+    inner = json.dumps(
+        {
+            "device": "Thermostat",
+            "action": "set:23",
+            "message": "Raise the thermostat to 23?",
+        }
+    )
+    client = _FakeBedrockClient(response_text=f"```json\n{inner}\n```")
+
+    result = intent.interpret_command_impl("I'm cold", client=client)
+
+    assert result["status"] == "proposed"
+    assert result["device"] == "Thermostat"
+    assert result["action"] == "set:23"
+
+
+def test_hallucinated_device_is_rejected(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-model-id")
+
+    fake_response = json.dumps(
+        {
+            "device": "Pool Heater",
+            "action": "on",
+            "message": "Turn on the pool heater?",
+        }
+    )
+    client = _FakeBedrockClient(response_text=fake_response)
+
+    result = intent.interpret_command_impl("warm the pool", client=client)
+
+    assert result["status"] == "error"
+    assert "not in the household inventory" in result["reason"]
+
+
+def test_invalid_action_for_device_is_rejected(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-model-id")
+
+    fake_response = json.dumps(
+        {
+            "device": "Kitchen Light",
+            "action": "lock",
+            "message": "Lock the kitchen light?",
+        }
+    )
+    client = _FakeBedrockClient(response_text=fake_response)
+
+    result = intent.interpret_command_impl("secure the kitchen", client=client)
+
+    assert result["status"] == "error"
+    assert "not valid" in result["reason"]
+
+
+def test_bedrock_client_timeout_and_retry_config(monkeypatch):
+    """Bedrock client is configured with connect_timeout=3, read_timeout=5, retries=2."""
+    monkeypatch.setattr(intent, "_bedrock_client", None)
+    client = intent._get_bedrock_client()
+    assert client.meta.config.connect_timeout == 3
+    assert client.meta.config.read_timeout == 5
+    assert client.meta.config.retries["total_max_attempts"] == 3  # max_attempts=2 + 1 initial
+
+
+def test_markdown_fence_stripping_variations():
+    """_strip_markdown_fences cleans 다양한 markdown code fences correctly."""
+    raw1 = "```json\n{\"device\": \"Kitchen Light\", \"action\": \"on\"}\n```"
+    assert json.loads(intent._strip_markdown_fences(raw1)) == {"device": "Kitchen Light", "action": "on"}
+
+    raw2 = "```\n{\"device\": \"Kitchen Light\", \"action\": \"off\"}\n```"
+    assert json.loads(intent._strip_markdown_fences(raw2)) == {"device": "Kitchen Light", "action": "off"}
+
+    raw3 = "  ```json   {\"device\": \"Kitchen Light\", \"action\": \"on\"}   ```  "
+    assert json.loads(intent._strip_markdown_fences(raw3)) == {"device": "Kitchen Light", "action": "on"}
+
+
+def test_empty_or_whitespace_device_is_rejected(tmp_path, monkeypatch):
+    _seed(tmp_path, monkeypatch)
+    monkeypatch.setenv("BEDROCK_MODEL_ID", "test-model-id")
+
+    fake_response = json.dumps({"device": "", "action": "on"})
+    client = _FakeBedrockClient(response_text=fake_response)
+
+    result = intent.interpret_command_impl("turn on", client=client)
+    assert result["status"] == "error"
+

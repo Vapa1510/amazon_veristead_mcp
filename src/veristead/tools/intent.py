@@ -14,10 +14,12 @@ from __future__ import annotations
 
 import json
 import os
+import re
 
 import boto3
+from botocore.config import Config
 
-from veristead.tools.devices import get_device_status_impl
+from veristead.tools.devices import _apply_action, get_device_status_impl
 
 _SYSTEM_PROMPT = """You translate a natural-language smart-home request into
 exactly one device action for the Veristead system.
@@ -31,7 +33,8 @@ object, no other text, in this exact shape:
 Action string rules, by device type:
 - light or plug: "on" or "off"
 - lock: "lock" or "unlock"
-- thermostat: "set:<integer temperature>"
+- garage: "open" or "close"
+- thermostat: "set:<integer temperature>" (allowed range 10-32 C)
 
 If the command doesn't clearly map to exactly one device and a valid
 action, respond with ONLY:
@@ -40,10 +43,76 @@ action, respond with ONLY:
 Never invent a device name that isn't in the provided list. Never invent
 an action outside the rules above."""
 
+def _strip_markdown_fences(raw_text: str) -> str:
+    """Strip markdown code fences from model response using regex."""
+    text = raw_text.strip()
+    text = re.sub(r"^```(?:json)?\s*", "", text, flags=re.IGNORECASE)
+    text = re.sub(r"\s*```$", "", text)
+    return text.strip()
+
+
+_bedrock_client = None
+
 
 def _get_bedrock_client():
-    region = os.getenv("AWS_REGION", "us-east-1")
-    return boto3.client("bedrock-runtime", region_name=region)
+    """Reuse a single boto3 client (with hardened timeouts) across requests."""
+    global _bedrock_client
+    if _bedrock_client is None:
+        region = os.getenv("AWS_REGION", "us-east-1")
+        _bedrock_client = boto3.client(
+            "bedrock-runtime",
+            region_name=region,
+            config=Config(
+                connect_timeout=3,
+                read_timeout=5,
+                retries={"max_attempts": 2},
+            ),
+        )
+    return _bedrock_client
+
+
+def _parse_json_payload(raw_text: str) -> dict:
+    """Parse model output, tolerating optional markdown code fences."""
+    text = _strip_markdown_fences(raw_text)
+    return json.loads(text)
+
+
+def _validate_proposal(devices: list[dict], device_name: str, action: str) -> dict | None:
+    """Return an error dict if the proposal is not executable against inventory."""
+    if not device_name or not isinstance(device_name, str):
+        return {
+            "status": "error",
+            "reason": "proposed device name is missing or invalid",
+        }
+    clean_name = device_name.strip().lower()
+    matched = next(
+        (
+            d for d in devices
+            if d["name"].lower() == clean_name
+            or d["id"].lower() == clean_name
+            or d["id"].lower() == clean_name.replace(" ", "_")
+        ),
+        None,
+    )
+    if matched is None:
+        return {
+            "status": "error",
+            "reason": f"proposed device '{device_name}' is not in the household inventory",
+        }
+    if not action or not isinstance(action, str):
+        return {
+            "status": "error",
+            "reason": "proposed action is missing or invalid",
+        }
+    if _apply_action(matched["state"], matched["type"], action) is None:
+        return {
+            "status": "error",
+            "reason": (
+                f"proposed action '{action}' is not valid for "
+                f"{matched['name']} ({matched['type']})"
+            ),
+        }
+    return None
 
 
 def interpret_command_impl(command: str, client=None) -> dict:
@@ -99,8 +168,8 @@ def interpret_command_impl(command: str, client=None) -> dict:
 
     try:
         raw_text = response["output"]["message"]["content"][0]["text"]
-        parsed = json.loads(raw_text)
-    except (KeyError, IndexError, json.JSONDecodeError) as exc:
+        parsed = _parse_json_payload(raw_text)
+    except (KeyError, IndexError, json.JSONDecodeError, TypeError) as exc:
         return {"status": "error", "reason": f"could not parse Bedrock's response: {exc}"}
 
     if "error" in parsed:
@@ -109,9 +178,18 @@ def interpret_command_impl(command: str, client=None) -> dict:
     if "device" not in parsed or "action" not in parsed:
         return {"status": "error", "reason": "Bedrock response missing device or action"}
 
+    validation_error = _validate_proposal(devices, parsed["device"], parsed["action"])
+    if validation_error is not None:
+        return validation_error
+
+    # Normalize to the canonical device name from inventory.
+    canonical = next(
+        d["name"] for d in devices if d["name"].lower() == parsed["device"].strip().lower()
+    )
+
     return {
         "status": "proposed",
-        "device": parsed["device"],
-        "action": parsed["action"],
-        "message": parsed.get("message", f"Set {parsed['device']} to {parsed['action']}?"),
+        "device": canonical,
+        "action": parsed["action"].strip().lower(),
+        "message": parsed.get("message", f"Set {canonical} to {parsed['action']}?"),
     }
